@@ -21,7 +21,7 @@ Start the agentmemory server in a separate terminal:
 npx @agentmemory/agentmemory
 ```
 
-Install the extension into omp (links this folder into omp's plugin directory):
+Tested with Oh My Pi 18.12.6. Run this from an agentmemory checkout to link the extension into omp's plugin directory:
 
 ```bash
 omp plugin install ./integrations/omp
@@ -32,7 +32,7 @@ Then restart omp for the extension to load. Verify it was picked up:
 ```bash
 omp plugin doctor
 # ✔ plugins_directory: Found at ...
-# ✔ plugin:agentmemory-omp-extension: v0.9.28
+# ✔ plugin:agentmemory-omp-extension: ...
 ```
 
 Alternatively, `omp install ./integrations/omp` is an alias for the same command.
@@ -47,18 +47,19 @@ Alternatively, `omp install ./integrations/omp` is an alias for the same command
 - `memory_search` — search prior decisions, bugs, workflows, and preferences
 - `memory_save` — write durable facts back to long-term memory
 - `/agentmemory-status` — check health from inside omp
-- 15 lifecycle hooks — injects relevant memories at every stage of the agent loop (before/after tool calls, session start/end, context updates, and consolidation events)
+- Lifecycle hooks recall project memories and lessons, capture prompts and tool outcomes, track session switches, and preserve memory context during compaction.
+- Tool outputs remain intact. Memory capture is bounded separately from the conversation sent to the model.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `AGENTMEMORY_URL` | `http://localhost:3111` | agentmemory server URL |
-| `AGENTMEMORY_SECRET` | (none) | Bearer token for protected instances |
+| `AGENTMEMORY_SECRET` | (auto-detected locally) | Explicit bearer token; loopback connections otherwise read `~/.agentmemory/.env` or `~/.agentmemory/secret`. Remote servers require an explicit token. |
+| `AGENTMEMORY_CREDENTIAL_MODE` | (unset) | Set to `explicit` to disable local credential discovery. |
 | `AGENTMEMORY_PROJECT_NAME` | (unset) | Overrides the project name used in session/observation payloads. Defaults to the git repo basename (or cwd basename if not a git repo). |
 | `AGENTMEMORY_REQUIRE_HTTPS` | (off) | When set to `1`, refuse to send a bearer token over plaintext HTTP to a non-loopback host. Sends the token only when `AGENTMEMORY_URL` is `https://...` or points at `localhost`/`127.0.0.1`/`::1`. With this off, the plugin warns once but still sends. |
 | `AGENTMEMORY_INJECT_CONTEXT` | (off) | When set to `1`, injects file enrichment context (via `/enrich`) into the conversation for files touched by tools. |
-| `AGENTMEMORY_CONSOLIDATION_ENABLED` | (on) | When set to `0`, disables background memory consolidation jobs. |
 
 ## Smoke test
 
@@ -72,7 +73,8 @@ You should see `agentmemory healthy` and a footer status like `🧠 agentmemory`
 
 ## Notes
 
-- This extension uses omp's extension API, not MCP, so it can hook directly into the agent lifecycle with 15 granular hooks covering the full conversation loop.
+- This extension uses omp's extension API, not MCP. Session finalization is awaited within omp's two-second shutdown budget; summary refresh and scheduled consolidation run on the server.
+- If the daemon is unavailable, the conversation continues and memory tools report failure. Unacknowledged captures are not queued for offline replay.
 - One local agentmemory server can be shared across omp, pi, pi2, Hermes, OpenClaw, Claude Code, Codex CLI, and Gemini CLI.
 
 ## See also

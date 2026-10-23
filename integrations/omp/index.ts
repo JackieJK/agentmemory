@@ -1,8 +1,8 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execSync } from "node:child_process";
-import { createPlaintextBearerAuthGuard } from "./security.js";
+import { createPlaintextBearerAuthGuard, resolveSecret } from "./security.js";
 
 type TextBlock = { type?: string; text?: string };
 type AssistantMessage = { role?: string; content?: unknown };
@@ -27,8 +27,12 @@ type HealthResponse = {
     notes?: string[];
   };
 };
+type SearchResponse = {
+  results?: SmartSearchResult[];
+  lessons?: { content: string; confidence?: number }[];
+};
 
-const DEFAULT_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
+const DEFAULT_URL = "http://localhost:3111";
 const guardPlaintextBearerAuth = createPlaintextBearerAuthGuard();
 const DEDUP_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -39,7 +43,7 @@ const TOOL_GUIDANCE = [
 ].join(" ");
 
 function getBaseUrl(): string {
-  return DEFAULT_URL.replace(/\/+$/, "");
+  return (process.env["AGENTMEMORY_URL"] || DEFAULT_URL).replace(/\/+$/, "");
 }
 
 // Mirrors src/state/schema.ts primitives — the extension is a standalone
@@ -56,14 +60,14 @@ function fingerprintId(prefix: string, content: string): string {
   return `${prefix}_${hash.slice(0, 16)}`;
 }
 
-function isBase64Image(val: unknown): val is string {
+function isBase64Image(val: unknown): boolean {
   if (typeof val !== "string") return false;
   return val.startsWith("data:image/") || val.startsWith("iVBORw0KGgo") || val.startsWith("/9j/");
 }
 
 function stripImageData(text: string): string {
   if (isBase64Image(text)) return "[image data]";
-  return text;
+  return text.replace(/data:image\/[\w.+-]+;base64,[A-Za-z0-9+/=]+/g, "[image data]");
 }
 
 function getText(content: unknown): string {
@@ -91,10 +95,9 @@ function getLastAssistantText(messages: unknown[]): string {
   return "";
 }
 
-function formatSearchResults(results: SmartSearchResult[]): string {
-  if (!results.length) return "No relevant memories found.";
-  return results
-    .slice(0, 5)
+function formatSearchResults(response: SearchResponse, limit = 5): string {
+  const memories = (response.results || [])
+    .slice(0, limit)
     .map((result, index) => {
       const obs = result.observation ?? result;
       const title = obs.title?.trim() || `Memory ${index + 1}`;
@@ -105,6 +108,8 @@ function formatSearchResults(results: SmartSearchResult[]): string {
       return `- ${title} (${type})${scoreText}${narrative ? `: ${narrative}` : ""}`;
     })
     .join("\n");
+  const lessons = (response.lessons || []).slice(0, limit).map(lesson => `- ${lesson.content} (lesson)`).join("\n");
+  return [memories, lessons].filter(Boolean).join("\n") || "No relevant memories found.";
 }
 
 function resolveProject(cwd?: string): string {
@@ -136,7 +141,7 @@ async function callAgentMemory<T>(
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const url = `${baseUrl}/agentmemory/${pathname.replace(/^\/+/, "")}`;
   const headers: Record<string, string> = {};
-  const secret = process.env["AGENTMEMORY_SECRET"];
+  const secret = resolveSecret(baseUrl, process.env["AGENTMEMORY_SECRET"]);
   guardPlaintextBearerAuth(baseUrl, secret);
   if (options?.body !== undefined) headers["Content-Type"] = "application/json";
   if (secret) headers["Authorization"] = `Bearer ${secret}`;
@@ -206,7 +211,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
 
   async function refreshStatus(ctx: { ui: { setStatus: (key: string, text: string) => void } }) {
     const health = await getHealth();
-    lastHealthOk = !!health && (health.status === "healthy" || health.health?.status === "healthy");
+    lastHealthOk = !!health && ["ok", "healthy", "degraded"].includes(health.status || health.health?.status || "");
     ctx.ui.setStatus("agentmemory", lastHealthOk ? "🧠 agentmemory" : "🧠 agentmemory off");
   }
 
@@ -244,7 +249,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     label: "Memory Health",
     description: "Check whether the local agentmemory server is reachable and healthy",
     parameters: z.object({}),
-    async execute() {
+    async execute(): Promise<AgentToolResult> {
       const health = await getHealth();
       if (!health) {
         return {
@@ -272,15 +277,21 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       query: z.string().describe("What to search for in memory"),
       limit: z.number().int().min(1).max(10).default(5).describe("Maximum results"),
     }),
-    async execute(_toolCallId, params) {
-      const result = await callAgentMemory<{ results?: SmartSearchResult[] }>("smart-search", {
-        body: { query: params.query, limit: params.limit ?? 5 },
+    async execute(_toolCallId, params: { query: string; limit?: number }): Promise<AgentToolResult> {
+      const result = await callAgentMemory<SearchResponse>("smart-search", {
+        body: { query: params.query, limit: params.limit ?? 5, project: currentProject },
         timeoutMs: 3000,
       });
-      const results = result?.results || [];
+      if (!result) {
+        return {
+          content: [{ type: "text", text: "Failed to search agentmemory. Check the server URL and credentials." }],
+          details: { ok: false },
+        };
+      }
+      const results = result.results || [];
       return {
-        content: [{ type: "text", text: formatSearchResults(results) }],
-        details: { query: params.query, results },
+        content: [{ type: "text", text: formatSearchResults(result, params.limit ?? 5) }],
+        details: { query: params.query, results, lessons: result.lessons || [] },
       };
     },
   });
@@ -293,9 +304,9 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       content: z.string().describe("What should be remembered"),
       type: z.string().default("fact").describe("Memory type"),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params: { content: string; type?: string }): Promise<AgentToolResult> {
       const result = await callAgentMemory<Record<string, unknown>>("remember", {
-        body: { content: params.content, type: params.type || "fact" },
+        body: { content: params.content, type: params.type || "fact", project: currentProject },
         timeoutMs: 3000,
       });
       if (!result) {
@@ -311,14 +322,14 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     },
   });
 
-  // session_start — register session and load project profile
-  pi.on("session_start", async (_event, ctx) => {
-    const sessionFile = ctx.sessionManager.getSessionFile();
-    sessionId = sessionFile
-      ? path.basename(sessionFile).replace(/\.[^.]+$/, "")
-      : generateId("ephemeral");
-    currentProject = resolveProject();
-    currentCwd = process.cwd();
+  async function startSession(_event: unknown, ctx: ExtensionContext) {
+    sessionId = ctx.sessionManager.getSessionId();
+    currentCwd = ctx.cwd;
+    currentProject = resolveProject(currentCwd);
+    lastPrompt = "";
+    cachedContext = undefined;
+    recentHashes.clear();
+    fileStash.clear();
     await refreshStatus(ctx);
     if (lastHealthOk) {
       await callAgentMemory("session/start", {
@@ -326,16 +337,18 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
         timeoutMs: 2000,
       });
     }
+  }
+  pi.on("session_start", startSession);
+  pi.on("session_switch", async (event, ctx) => {
+    await endSession();
+    await startSession(event, ctx);
   });
 
   // before_agent_start — recall relevant memories and inject into system prompt
   pi.on("before_agent_start", async (event, ctx) => {
-    currentProject = resolveProject();
-    const eventCwd = (event as Record<string, unknown>).systemPromptOptions as
-      | { cwd?: string }
-      | undefined;
-    currentCwd = eventCwd?.cwd || process.cwd();
-    const prompt = (event as Record<string, unknown>).prompt as string | undefined;
+    currentCwd = ctx.cwd;
+    currentProject = resolveProject(currentCwd);
+    const prompt = event.prompt;
     lastPrompt = prompt?.trim() || "";
     if (!lastPrompt) return;
 
@@ -355,22 +368,21 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
         timeoutMs: 3000,
       }));
 
-      const result = await callAgentMemory<{ results?: SmartSearchResult[] }>("smart-search", {
-        body: { query: lastPrompt, limit: 5 },
+      const result = await callAgentMemory<SearchResponse>("smart-search", {
+        body: { query: lastPrompt, limit: 5, project: currentProject },
         timeoutMs: 3000,
       });
       const results = result?.results || [];
-      if (results.length) {
+      if (results.length || result?.lessons?.length) {
         recallBlock = [
           "Relevant long-term memory from agentmemory:",
-          formatSearchResults(results),
+          formatSearchResults(result!),
         ].join("\n");
       }
     }
 
-    const systemPrompt = (event as Record<string, unknown>).systemPrompt as string | undefined;
     return {
-      systemPrompt: [systemPrompt, TOOL_GUIDANCE, recallBlock].filter(Boolean).join("\n\n"),
+      systemPrompt: [...event.systemPrompt, TOOL_GUIDANCE, recallBlock].filter(Boolean),
     };
   });
 
@@ -391,10 +403,10 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
 
     const output = stripImageData(getText(event.content));
     const input = JSON.stringify(event.input ?? {});
-    if (isDuplicate(`${event.toolName}:${input}:${output}`)) return;
+    if (isDuplicate(`${event.toolName}:${event.isError}:${input}:${output}`)) return;
 
     trackPost(callAgentMemory("observe", {
-      body: observePayload("post_tool_use", {
+      body: observePayload(event.isError ? "post_tool_failure" : "post_tool_use", {
         tool_name: event.toolName,
         tool_input: input.slice(0, 8000),
         tool_output: output.slice(0, 8000),
@@ -404,34 +416,28 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     }));
   });
 
-  // context — truncate large tool outputs; optionally inject file enrichment
+  // context — optionally inject file enrichment
   pi.on("context", async (event) => {
-    const MAX_TOOL_OUTPUT = 8000;
-    const trimmed = event.messages.map((msg) => {
-      if (msg.role !== "toolResult") return msg;
-      const content = msg.content.map((chunk) => {
-        if (chunk.type !== "text" || chunk.text.length <= MAX_TOOL_OUTPUT) return chunk;
-        return { ...chunk, text: chunk.text.slice(0, MAX_TOOL_OUTPUT) + "\n[... truncated by agentmemory]" };
-      });
-      return { ...msg, content };
-    });
-
     const enrichEnabled = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "1";
     if (enrichEnabled && fileStash.size > 0 && lastHealthOk) {
       const files = [...fileStash].slice(0, 20);
       fileStash.clear();
       try {
         const result = await callAgentMemory<{ context?: string }>("enrich", {
-          body: { sessionId, files, toolName: "enrich_inject" },
+          body: { sessionId, files, project: currentProject, toolName: "enrich_inject" },
           timeoutMs: 2000,
         });
         if (result?.context) {
-          trimmed.push({ role: "system", content: result.context } as never);
+          return { messages: [...event.messages, {
+            role: "custom" as const,
+            customType: "agentmemory-context",
+            content: result.context,
+            display: false,
+            timestamp: Date.now(),
+          }] };
         }
       } catch {}
     }
-
-    return { messages: trimmed };
   });
 
   // session_before_compact — fetch context summary before compaction
@@ -482,47 +488,25 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     }));
   });
 
-  // session_shutdown — drain in-flight posts, consolidate, summarize, end session.
-  // Handler must return within 2s; heavy work runs in a fire-and-forget chain.
-  pi.on("session_shutdown", () => {
+  // The host allows two seconds for shutdown; summary refresh runs on the server.
+  async function endSession() {
     if (!lastHealthOk) return;
-
-    void (async () => {
-      // Drain pending observe POSTs with a 1s hard cap. Most pendingPosts
-      // were dispatched before session_shutdown fired; the race prevents
-      // a single stalled request from blocking the entire drain.
+    const endingSession = sessionId;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
       await Promise.race([
         Promise.allSettled([...pendingPosts]),
-        (() => { const { promise, resolve } = Promise.withResolvers<void>(); setTimeout(resolve, 1000); return promise; })(),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 700); }),
       ]);
-
-      if (process.env["AGENTMEMORY_CONSOLIDATION_ENABLED"] !== "0") {
-        await callAgentMemory("crystals/auto", {
-          body: { olderThanDays: 0 },
-          timeoutMs: 60000,
-        });
-        await callAgentMemory("consolidate-pipeline", {
-          body: { tier: "all", force: true },
-          timeoutMs: 120000,
-        });
-      }
-
-      await callAgentMemory("summarize", {
-        body: { sessionId },
-        timeoutMs: 120000,
-      });
-
-      await callAgentMemory("session/end", {
-        body: {
-          sessionId,
-          project: currentProject,
-          cwd: currentCwd,
-          timestamp: new Date().toISOString(),
-        },
-        timeoutMs: 5000,
-      });
-    })();
-  });
+    } finally {
+      clearTimeout(timer);
+    }
+    await callAgentMemory("session/end", {
+      body: { sessionId: endingSession },
+      timeoutMs: 1000,
+    });
+  }
+  pi.on("session_shutdown", endSession);
 
   // tool_approval_requested — observe permission prompts
   pi.on("tool_approval_requested", (event) => {
@@ -530,7 +514,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     trackPost(callAgentMemory("observe", {
       body: observePayload("permission_prompt", {
         tool_name: event.toolName,
-        tool_call_id: (event as Record<string, unknown>).toolCallId,
+        tool_call_id: event.toolCallId,
       }),
       timeoutMs: 2000,
     }));
@@ -542,7 +526,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     trackPost(callAgentMemory("observe", {
       body: observePayload("permission_reply", {
         tool_name: event.toolName,
-        approved: (event as Record<string, unknown>).approved,
+        approved: event.approved,
       }),
       timeoutMs: 2000,
     }));
