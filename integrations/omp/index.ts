@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execSync } from "node:child_process";
-import { createPlaintextBearerAuthGuard } from "./security.js";
+import { createPlaintextBearerAuthGuard, resolveSecret } from "./security.js";
 
 type TextBlock = { type?: string; text?: string };
 type AssistantMessage = { role?: string; content?: unknown };
@@ -32,11 +32,6 @@ const DEFAULT_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const guardPlaintextBearerAuth = createPlaintextBearerAuthGuard();
 const DEDUP_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
-const TOOL_GUIDANCE = [
-  "agentmemory is available for cross-session memory.",
-  "Use memory_search to recall prior decisions, preferences, bugs, and workflows.",
-  "Use memory_save when you discover durable facts worth remembering beyond this session.",
-].join(" ");
 
 function getBaseUrl(): string {
   return DEFAULT_URL.replace(/\/+$/, "");
@@ -136,7 +131,7 @@ async function callAgentMemory<T>(
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const url = `${baseUrl}/agentmemory/${pathname.replace(/^\/+/, "")}`;
   const headers: Record<string, string> = {};
-  const secret = process.env["AGENTMEMORY_SECRET"];
+  const secret = resolveSecret(baseUrl, process.env["AGENTMEMORY_SECRET"]);
   guardPlaintextBearerAuth(baseUrl, secret);
   if (options?.body !== undefined) headers["Content-Type"] = "application/json";
   if (secret) headers["Authorization"] = `Bearer ${secret}`;
@@ -239,17 +234,19 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
 
   const { z } = pi.zod;
 
+  const healthParams = z.object({});
   pi.registerTool({
     name: "memory_health",
     label: "Memory Health",
     description: "Check whether the local agentmemory server is reachable and healthy",
-    parameters: z.object({}),
+    parameters: healthParams,
+    loadMode: "essential",
     async execute() {
       const health = await getHealth();
       if (!health) {
         return {
           content: [{ type: "text", text: `agentmemory is unreachable at ${getBaseUrl()}` }],
-          details: { ok: false },
+          details: { ok: false } as Record<string, unknown>,
         };
       }
       return {
@@ -259,19 +256,21 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
             text: `agentmemory status: ${health.status || health.health?.status || "unknown"}${health.version ? ` (v${health.version})` : ""}`,
           },
         ],
-        details: health,
+        details: health as Record<string, unknown>,
       };
     },
   });
 
+  const searchParams = z.object({
+    query: z.string().describe("What to search for in memory"),
+    limit: z.number().int().min(1).max(10).default(5).describe("Maximum results"),
+  });
   pi.registerTool({
     name: "memory_search",
     label: "Memory Search",
     description: "Search agentmemory for cross-session project memory, prior decisions, bugs, and user preferences",
-    parameters: z.object({
-      query: z.string().describe("What to search for in memory"),
-      limit: z.number().int().min(1).max(10).default(5).describe("Maximum results"),
-    }),
+    parameters: searchParams,
+    loadMode: "essential",
     async execute(_toolCallId, params) {
       const result = await callAgentMemory<{ results?: SmartSearchResult[] }>("smart-search", {
         body: { query: params.query, limit: params.limit ?? 5 },
@@ -285,14 +284,16 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     },
   });
 
+  const saveParams = z.object({
+    content: z.string().describe("What should be remembered"),
+    type: z.string().default("fact").describe("Memory type"),
+  });
   pi.registerTool({
     name: "memory_save",
     label: "Memory Save",
     description: "Save a durable fact, convention, workflow, preference, or bug fix into agentmemory",
-    parameters: z.object({
-      content: z.string().describe("What should be remembered"),
-      type: z.string().default("fact").describe("Memory type"),
-    }),
+    parameters: saveParams,
+    loadMode: "essential",
     async execute(_toolCallId, params) {
       const result = await callAgentMemory<Record<string, unknown>>("remember", {
         body: { content: params.content, type: params.type || "fact" },
@@ -317,8 +318,8 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     sessionId = sessionFile
       ? path.basename(sessionFile).replace(/\.[^.]+$/, "")
       : generateId("ephemeral");
-    currentProject = resolveProject();
-    currentCwd = process.cwd();
+    currentProject = resolveProject(ctx.cwd);
+    currentCwd = ctx.cwd;
     await refreshStatus(ctx);
     if (lastHealthOk) {
       await callAgentMemory("session/start", {
@@ -328,15 +329,14 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     }
   });
 
-  // before_agent_start — recall relevant memories and inject into system prompt
+  // before_agent_start — recall relevant memories and inject into the system
+  // prompt. omp >= 18.12: event.systemPrompt is string[] and the handler
+  // result's systemPrompt must also be string[]; returning nothing keeps the
+  // host prompt untouched.
   pi.on("before_agent_start", async (event, ctx) => {
-    currentProject = resolveProject();
-    const eventCwd = (event as Record<string, unknown>).systemPromptOptions as
-      | { cwd?: string }
-      | undefined;
-    currentCwd = eventCwd?.cwd || process.cwd();
-    const prompt = (event as Record<string, unknown>).prompt as string | undefined;
-    lastPrompt = prompt?.trim() || "";
+    currentProject = resolveProject(ctx.cwd);
+    currentCwd = ctx.cwd;
+    lastPrompt = (event.prompt || "").trim();
     if (!lastPrompt) return;
 
     await refreshStatus(ctx);
@@ -368,9 +368,10 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       }
     }
 
-    const systemPrompt = (event as Record<string, unknown>).systemPrompt as string | undefined;
+    if (!recallBlock) return;
+
     return {
-      systemPrompt: [systemPrompt, TOOL_GUIDANCE, recallBlock].filter(Boolean).join("\n\n"),
+      systemPrompt: [...(event.systemPrompt || []), recallBlock],
     };
   });
 
@@ -426,7 +427,12 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
           timeoutMs: 2000,
         });
         if (result?.context) {
-          trimmed.push({ role: "system", content: result.context } as never);
+          trimmed.push({
+            role: "developer",
+            content: result.context,
+            synthetic: true,
+            timestamp: Date.now(),
+          } as never);
         }
       } catch {}
     }
@@ -530,7 +536,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     trackPost(callAgentMemory("observe", {
       body: observePayload("permission_prompt", {
         tool_name: event.toolName,
-        tool_call_id: (event as Record<string, unknown>).toolCallId,
+        tool_call_id: event.toolCallId,
       }),
       timeoutMs: 2000,
     }));
@@ -542,7 +548,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     trackPost(callAgentMemory("observe", {
       body: observePayload("permission_reply", {
         tool_name: event.toolName,
-        approved: (event as Record<string, unknown>).approved,
+        approved: event.approved,
       }),
       timeoutMs: 2000,
     }));
