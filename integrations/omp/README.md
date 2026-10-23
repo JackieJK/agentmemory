@@ -21,10 +21,21 @@ Start the agentmemory server in a separate terminal:
 npx @agentmemory/agentmemory
 ```
 
-Install the extension into omp (links this folder into omp's plugin directory):
+Install the extension into omp from the repo root:
 
 ```bash
 omp plugin install ./integrations/omp
+```
+
+`omp plugin install` **links, not copies**: it creates a junction (Windows) /
+symlink (Unix) at `~/.omp/plugins/node_modules/agentmemory-omp-extension`
+pointing at this folder, so the linked folder stays the live source — editing
+`index.ts` here takes effect on the next omp restart without reinstalling.
+Use `--scope=project` to register it per-project instead of for the user, or
+`--dry-run` to preview. Removal is symmetric:
+
+```bash
+omp plugin uninstall agentmemory-omp-extension
 ```
 
 Then restart omp for the extension to load. Verify it was picked up:
@@ -38,8 +49,8 @@ omp plugin doctor
 Alternatively, `omp install ./integrations/omp` is an alias for the same command.
 
 > **Note:** Use `omp plugin install` only. Do **not** copy this folder to
-> `~/.omp/agent/extensions/agentmemory/` — omp scans that directory too, so the
-> extension would load twice and every tool call would be observed twice.
+> `~/.omp/agent/extensions/agentmemory/` — omp scans that directory too, so
+> the extension would load twice and every tool call would be observed twice.
 
 ## What it adds
 
