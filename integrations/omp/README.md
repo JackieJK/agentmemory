@@ -69,8 +69,9 @@ Alternatively, `omp install ./integrations/omp` is an alias for the same command
 | `AGENTMEMORY_SECRET` | (auto-detected locally) | Explicit bearer token; loopback connections otherwise read `~/.agentmemory/.env` or `~/.agentmemory/secret`. Remote servers require an explicit token. |
 | `AGENTMEMORY_CREDENTIAL_MODE` | (unset) | Set to `explicit` to disable local credential discovery. |
 | `AGENTMEMORY_PROJECT_NAME` | (unset) | Overrides the project name used in session/observation payloads. Defaults to the git repo basename (or cwd basename if not a git repo). |
-| `AGENTMEMORY_REQUIRE_HTTPS` | (off) | When set to `1`, refuse to send a bearer token over plaintext HTTP to a non-loopback host. Sends the token only when `AGENTMEMORY_URL` is `https://...` or points at `localhost`/`127.0.0.0/8`/`::1`. With this off, the plugin warns once but still sends. |
 | `AGENTMEMORY_INJECT_CONTEXT` | (off) | When set to `1`, injects file enrichment context (via `/enrich`) into the conversation for files touched by tools. |
+
+Bearer tokens are only sent over HTTPS or to loopback addresses (`localhost`, `127.0.0.0/8`, or `::1`). Remote HTTP connections with credentials are refused.
 
 ## Smoke test
 

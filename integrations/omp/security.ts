@@ -60,22 +60,8 @@ export function usesPlaintextBearerAuth(baseUrl: string, secret?: string): boole
   }
 }
 
-export function plaintextBearerAuthMessage(baseUrl: string): string {
-  return `agentmemory: AGENTMEMORY_SECRET is configured for plaintext HTTP to ${baseUrl}. Bearer tokens and memory payloads can be observed on the network; use HTTPS or an SSH tunnel.`;
-}
-
-export function createPlaintextBearerAuthGuard(
-  warn: (message: string) => void = (message) => console.warn(message),
-  env?: { AGENTMEMORY_REQUIRE_HTTPS?: string },
-): (baseUrl: string, secret?: string) => void {
-  let warned = false;
-  return (baseUrl, secret) => {
-    if (!usesPlaintextBearerAuth(baseUrl, secret)) return;
-    const message = plaintextBearerAuthMessage(baseUrl);
-    if ((env || process.env).AGENTMEMORY_REQUIRE_HTTPS === "1") throw new Error(message);
-    if (!warned) {
-      warned = true;
-      warn(message);
-    }
-  };
+export function guardPlaintextBearerAuth(baseUrl: string, secret?: string): void {
+  if (usesPlaintextBearerAuth(baseUrl, secret)) {
+    throw new Error("agentmemory: refusing to send AGENTMEMORY_SECRET over remote HTTP. Use HTTPS or an SSH tunnel to a loopback address.");
+  }
 }

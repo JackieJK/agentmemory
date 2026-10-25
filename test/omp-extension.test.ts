@@ -6,6 +6,8 @@ import { join } from "node:path";
 import agentmemoryExtension from "../integrations/omp/index.ts";
 import { resolveSecret } from "../integrations/omp/security.ts";
 
+// The host dispatches heterogeneous event/tool signatures; this test double
+// intentionally uses any at that boundary so tests can supply partial events.
 function extension() {
   const handlers = new Map<string, (...args: any[]) => any>();
   const tools = new Map<string, any>();
@@ -118,6 +120,40 @@ describe("omp extension", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it.each([[5, 5, 5], [2, 5, 5], [0, 8, 3], [8, 8, 10], [1, 0, 5], [0, 0, 5]])(
+    "shares the result limit across %i memories and %i lessons (limit %i)", async (memories, lessons, limit) => {
+      const results = Array.from({ length: memories }, (_, i) => ({ title: `Memory ${i}`, narrative: "fact" }));
+      const learned = Array.from({ length: lessons }, (_, i) => ({ content: `Lesson ${i}` }));
+      vi.mocked(fetch).mockImplementation(async url => Response.json(String(url).endsWith("health")
+        ? { status: "healthy" } : { results, lessons: learned }));
+      const { tools, handlers, ctx } = extension();
+      const result = await tools.get("memory_search").execute("search", { query: "facts", limit });
+      expect(result.details.results).toEqual(results.slice(0, limit));
+      expect(result.details.lessons).toEqual(learned.slice(0, Math.max(0, limit - memories)));
+      expect(result.content[0].text.split("\n").filter((line: string) => line.startsWith("- "))).toHaveLength(Math.min(memories + lessons, limit));
+      const recall = await handlers.get("before_agent_start")!({ prompt: "facts", systemPrompt: [] }, ctx);
+      expect((recall.message?.content || "").split("\n").filter((line: string) => line.startsWith("- "))).toHaveLength(Math.min(memories + lessons, 5));
+    },
+  );
+
+  it.each(["", "0", "1"])("blocks remote plaintext credentials regardless of HTTPS setting %s", setting => {
+    vi.stubEnv("AGENTMEMORY_REQUIRE_HTTPS", setting);
+    vi.stubEnv("AGENTMEMORY_URL", "http://memory.example.test");
+    vi.stubEnv("AGENTMEMORY_SECRET", "remote-fixture");
+    expect(() => extension()).toThrow("Use HTTPS or an SSH tunnel");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("sends explicit HTTPS credentials without following redirects", async () => {
+    vi.stubEnv("AGENTMEMORY_URL", "https://memory.example.test");
+    vi.stubEnv("AGENTMEMORY_SECRET", "remote-fixture");
+    const { tools } = extension();
+    await tools.get("memory_health").execute();
+    expect(fetch).toHaveBeenCalledWith("https://memory.example.test/agentmemory/health", expect.objectContaining({
+      redirect: "error", headers: { Authorization: "Bearer remote-fixture" },
+    }));
   });
 
   it("includes recalled lessons even when no observations match", async () => {
