@@ -128,7 +128,8 @@ describe("omp extension", () => {
     const result = await tools.get("memory_search").execute("search", { query: "labels" });
     expect(result.content[0].text).toContain("Prefer cobalt labels");
     const prompt = await handlers.get("before_agent_start")!({ prompt: "labels", systemPrompt: [] }, ctx);
-    expect(prompt.systemPrompt.join("\n")).toContain("Prefer cobalt labels");
+    expect(prompt.message).toMatchObject({ customType: "agentmemory-recall", content: expect.stringContaining("Prefer cobalt labels"), display: false });
+    expect(prompt.systemPrompt.join("\n")).not.toContain("Prefer cobalt labels");
   });
 
   it("continues capture and recall while the server reports degraded health", async () => {
@@ -165,6 +166,16 @@ describe("omp extension", () => {
     expect(payload.data.is_error).toBe(true);
   });
 
+  it("accepts stored credentials on the full loopback range in strict HTTPS mode", async () => {
+    vi.stubEnv("AGENTMEMORY_REQUIRE_HTTPS", "1");
+    vi.stubEnv("AGENTMEMORY_URL", "http://127.0.0.2:3111");
+    mkdirSync(join(fixtureHome, ".agentmemory"));
+    writeFileSync(join(fixtureHome, ".agentmemory", "secret"), "loopback-fixture");
+    const { tools } = extension();
+    await tools.get("memory_health").execute();
+    expect(vi.mocked(fetch).mock.lastCall?.[1]?.headers).toMatchObject({ Authorization: "Bearer loopback-fixture" });
+  });
+
   it("never discovers local credentials for a remote URL or explicit-only client", () => {
     const home = mkdtempSync(join(tmpdir(), "omp-auth-"));
     try {
@@ -197,7 +208,7 @@ describe("omp extension", () => {
     const messages = [{ role: "user", content: "read sample" }];
     const result = await handlers.get("context")!({ messages });
     expect(result.messages[0]).toEqual(messages[0]);
-    expect(result.messages[1]).toMatchObject({ role: "custom", customType: "agentmemory-context", content: "file convention", display: false });
+    expect(result.messages[1]).toMatchObject({ role: "custom", customType: "agentmemory-context", content: expect.stringContaining("file convention"), display: false });
   });
 
   it("bounds a stalled finalization request within the host shutdown deadline", async () => {

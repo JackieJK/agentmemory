@@ -2,8 +2,6 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-
 function usableSecret(value: unknown): string {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!trimmed || (trimmed.startsWith("${") && trimmed.endsWith("}"))) return "";
@@ -52,15 +50,11 @@ export function resolveSecret(url: string, explicit?: string): string {
   return envFileSecret() || usableSecret(readAgentmemoryFile("secret"));
 }
 
-function normalizedHostname(hostname: string): string {
-  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
-}
-
 export function usesPlaintextBearerAuth(baseUrl: string, secret?: string): boolean {
   if (!secret) return false;
   try {
     const parsed = new URL(baseUrl);
-    return parsed.protocol === "http:" && !LOOPBACK_HOSTS.has(normalizedHostname(parsed.hostname));
+    return parsed.protocol === "http:" && !isLoopbackUrl(baseUrl);
   } catch {
     return false;
   }
