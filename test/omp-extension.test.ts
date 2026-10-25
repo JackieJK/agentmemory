@@ -4,10 +4,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentmemoryExtension from "../integrations/omp/index.ts";
+import { spoolSummary } from "../src/capture/spool.js";
 import { resolveSecret } from "../integrations/omp/security.ts";
 
 // The host dispatches heterogeneous event/tool signatures; this test double
 // intentionally uses any at that boundary so tests can supply partial events.
+const shutdowns: (() => Promise<unknown>)[] = [];
 function extension() {
   const handlers = new Map<string, (...args: any[]) => any>();
   const tools = new Map<string, any>();
@@ -22,6 +24,7 @@ function extension() {
     registerTool: (tool: any) => tools.set(tool.name, tool),
     registerCommand: vi.fn(),
   } as any);
+  shutdowns.push(() => handlers.get("session_shutdown")!({}));
   return { handlers, tools, ctx };
 }
 
@@ -30,6 +33,7 @@ describe("omp extension", () => {
   beforeEach(() => {
     fixtureHome = mkdtempSync(join(tmpdir(), "omp-extension-"));
     vi.stubEnv("HOME", fixtureHome);
+    vi.stubEnv("AGENTMEMORY_CAPTURE_SPOOL_DIR", join(fixtureHome, "spool"));
     vi.stubEnv("AGENTMEMORY_URL", "http://127.0.0.1:43392");
     vi.stubEnv("AGENTMEMORY_SECRET", "");
     vi.stubEnv("AGENTMEMORY_PROJECT_NAME", "");
@@ -37,7 +41,9 @@ describe("omp extension", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "healthy", results: [] }))));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    vi.mocked(fetch).mockImplementation(async () => Response.json({ status: "healthy" }));
+    await Promise.all(shutdowns.splice(0).map(stop => stop()));
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     rmSync(fixtureHome, { recursive: true, force: true });
@@ -257,4 +263,56 @@ describe("omp extension", () => {
     await handlers.get("session_shutdown")!({});
     expect(Date.now() - started).toBeLessThan(1900);
   });
+  it("captures prompts, failed tools and final replies while the daemon is offline", async () => {
+    vi.mocked(fetch).mockRejectedValue(new Error("offline"));
+    const { handlers, ctx } = extension();
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("before_agent_start")!({ prompt: "offline work", systemPrompt: [] }, ctx);
+    handlers.get("tool_result")!({ toolName: "read", toolCallId: "offline-tool", input: {}, content: [{ type: "text", text: "missing" }], isError: true });
+    handlers.get("agent_end")!({ messages: [{ role: "assistant", content: "offline reply" }] });
+    await handlers.get("session_shutdown")!({});
+    expect(spoolSummary(process.env.AGENTMEMORY_URL!).records).toBe(3);
+  });
+
+  it("filters memory tools and configured exclusions without changing model-visible results", async () => {
+    vi.stubEnv("AGENTMEMORY_CAPTURE_DENY", "bash");
+    const { handlers, ctx } = extension();
+    await handlers.get("session_start")!({}, ctx); vi.mocked(fetch).mockClear();
+    for (const toolName of ["memory_save", "mcp__agentmemory__memory_search", "mcp__agentmemory_memory_sessions", "bash"]) {
+      expect(handlers.get("tool_result")!({ toolName, input: {}, content: [{ type: "text", text: "original" }] })).toBeUndefined();
+    }
+    handlers.get("tool_result")!({ toolName: "write", input: { path: "xd://mcp__agentmemory_memory_sessions", content: "{}" }, content: [{ type: "text", text: "recalled session" }] });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps distinct identical tool calls and deduplicates redelivery of the same call", async () => {
+    const { handlers, ctx } = extension();
+    await handlers.get("session_start")!({}, ctx); vi.mocked(fetch).mockClear();
+    const event = { toolName: "read", input: {}, content: [{ type: "text", text: "same" }] };
+    for (const toolCallId of ["one", "two", "two"]) handlers.get("tool_result")!({ ...event, toolCallId });
+    const posts = vi.mocked(fetch).mock.calls.map(([, options]) => JSON.parse(options!.body as string));
+    expect(posts).toHaveLength(2); expect(posts[0].eventId).not.toBe(posts[1].eventId);
+  });
+
+  it("redacts capture before truncation without modifying original tool output", async () => {
+    vi.stubEnv("AGENTMEMORY_CAPTURE_OUTPUT_MAX", "100");
+    const { handlers, ctx } = extension(); await handlers.get("session_start")!({}, ctx);
+    const event = { toolName: "read", input: { clientSecret: "short-secret" }, content: [{ type: "text", text: "<private>" + "secret".repeat(100) + "</private> safe suffix" }] };
+    handlers.get("tool_result")!(event);
+    const payload = JSON.parse(vi.mocked(fetch).mock.lastCall![1]!.body as string);
+    expect(payload.data.tool_output).toBe("[REDACTED] safe suffix");
+    expect(payload.data.tool_input).not.toContain("short-secret");
+    expect(event.content[0].text).toContain("<private>");
+  });
+
+  it("does not capture a final reply while OMP is still continuing asynchronously", async () => {
+    const { handlers, ctx } = extension();
+    await handlers.get("before_agent_start")!({ prompt: "work", systemPrompt: [] }, ctx); vi.mocked(fetch).mockClear();
+    const event = { messages: [{ role: "assistant", content: "partial" }] };
+    handlers.get("agent_end")!({ ...event, willContinue: true });
+    handlers.get("agent_end")!({ ...event, awaitingAsyncWork: true });
+    expect(fetch).not.toHaveBeenCalled();
+    handlers.get("agent_end")!(event); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
 });

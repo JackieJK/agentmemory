@@ -1,98 +1,76 @@
-<p align="center">
-  <img src="../../assets/banner.png" alt="agentmemory" width="640" />
-</p>
+# AgentMemory for Oh My Pi
 
-<h1 align="center">
-  &nbsp;agentmemory for Oh My Pi (omp)
-</h1>
+Native project recall, automatic capture and memory tools for Oh My Pi (OMP). Tested with OMP 18.12.6. The extension is included in `@agentmemory/agentmemory`; no separate npm package is required.
 
-<p align="center">
-  <strong>Your omp sessions remember everything. No more re-explaining.</strong><br/>
-  <sub>Persistent cross-session memory via <a href="https://github.com/rohitg00/agentmemory">agentmemory</a> — shared with Claude Code, Codex CLI, Gemini CLI, Hermes, OpenClaw, pi, and more.</sub>
-</p>
+## Install
 
----
-
-## Quick setup
-
-Start the agentmemory server in a separate terminal:
+Start the installed AgentMemory server in one terminal:
 
 ```bash
-npx @agentmemory/agentmemory
+agentmemory
 ```
 
-Tested with Oh My Pi 18.12.6. Run this from an agentmemory checkout to link the extension into omp's plugin directory:
+After starting OMP once to create its configuration directory, connect it:
 
 ```bash
-omp plugin install ./integrations/omp
+agentmemory connect omp --with-mcp
 ```
 
-`omp plugin install` **links, not copies**: it creates a junction (Windows) /
-symlink (Unix) at `~/.omp/plugins/node_modules/agentmemory-omp-extension`
-pointing at this folder, so the linked folder stays the live source — editing
-`index.ts` here takes effect on the next omp restart without reinstalling.
-Use `--scope=project` to register it per-project instead of for the user, or
-`--dry-run` to preview. Removal is symmetric:
+Restart OMP, run `/agentmemory-status`, then save a fact with `memory_save` and recall it in a new session with `memory_search`. Use the same project directory in both sessions.
+
+The connector copies the built extension and 17 skills into `~/.omp/agent/agentmemory` and adds that directory to `extensions` in OMP's `config.yml` (or existing `config.yaml`). It preserves unrelated settings and comments. `--dry-run` previews the installation; `--force` replaces customized managed files with a backup. Re-run connect after upgrading AgentMemory. No checkout needs to remain on disk.
+
+`--with-mcp` adds the full memory toolset through the installed AgentMemory MCP runtime. Without it, the native extension provides `memory_search`, `memory_save`, `memory_health` and automatic capture. The other skills require the MCP connection. An existing AgentMemory server in OMP's `mcp.json` is preserved; review its endpoint and tool visibility yourself. Credentials are read at runtime, never copied into OMP configuration.
+
+Use the same `OMP_PROFILE` (or `PI_PROFILE`), `PI_CONFIG_DIR` and `PI_CODING_AGENT_DIR` when connecting and launching OMP. Named profiles use their own `profiles/<name>/agent` directory. Project `extensions` arrays override the user array: include the installed package directory in that project array too. Enabling `--no-extensions` disables this integration.
+
+### Existing checkout installations
+
+If you previously used `omp plugin install ./integrations/omp`, uninstall that link before connecting:
 
 ```bash
 omp plugin uninstall agentmemory-omp-extension
+agentmemory connect omp --with-mcp
 ```
 
-Then restart omp for the extension to load. Verify it was picked up:
+Remove any manually configured duplicate AgentMemory extension paths as well. Running two copies can double capture. For development, build the repository first and run `node scripts/plugins/prepare-native.mjs`, then `omp plugin install ./integrations/omp`. That development install remains linked to the checkout; optional MCP must be configured separately.
 
-```bash
-omp plugin doctor
-# ✔ plugins_directory: Found at ...
-# ✔ plugin:agentmemory-omp-extension: ...
-```
+## Capabilities and commands
 
-Alternatively, `omp install ./integrations/omp` is an alias for the same command.
+- Automatic project recall of memories and lessons before each prompt, supplied as reference data without replacing the host's instructions.
+- Capture of prompts, successful and failed tool results, final replies, permission decisions and retry/compaction notifications. Session switching finalizes the previous session before starting the next.
+- Memory context during compaction; optional context for files touched by tools.
+- `memory_search`, `memory_save`, `memory_health` and `/agentmemory-status` work natively. Status includes offline queue, retained acknowledgements and dropped captures.
+- Bundled skills cover remember, recall, recap, handoff, forgetting, lessons, session history and commit context/history, plus reference guides. OMP exposes skills through `/skill:<name>`; use the name shown in its completion menu if another package has the same skill name.
+- `--with-mcp` makes the broader memory tools available, including sessions, lessons, governance, export and coordination. OMP exposes MCP operations as `xd://mcp__agentmemory_<tool>` devices through its `write` tool. Their scope is controlled by their arguments and backend configuration, so specify the intended project when needed.
 
-> **Note:** Use `omp plugin install` only. Do **not** copy this folder to
-> `~/.omp/agent/extensions/agentmemory/` — omp scans that directory too, so
-> the extension would load twice and every tool call would be observed twice.
+Automatic capture uses AgentMemory's privacy scrubber before sending or queueing data. `<private>` blocks and recognized secrets are redacted; memory tools are excluded from capture to avoid recording their own recalled output. Capture limits do not truncate the tool output seen by the model.
 
-## What it adds
+## Offline behavior
 
-- `memory_health` — confirm the shared memory server is reachable
-- `memory_search` — search prior decisions, bugs, workflows, and preferences
-- `memory_save` — write durable facts back to long-term memory
-- `/agentmemory-status` — check health from inside omp
-- Lifecycle hooks recall project memories and lessons, capture prompts and tool outcomes, track session switches, and preserve memory context during compaction.
-- Tool outputs remain intact. Memory capture is bounded separately from the conversation sent to the model.
+Failed captures from network errors, timeouts, HTTP 408/429 and server errors enter the bounded local capture spool. OMP retries at session start, before prompts, every ten seconds and on `/agentmemory-status`. Event IDs prevent duplicate storage across retries. Acknowledgements are retained through the daemon's durability window to cover restarts.
 
-## Environment variables
+The conversation continues when the daemon is unavailable. Explicit save/search tools report failure and are not queued. Authentication and other non-retryable client errors are reported instead of retried forever. Queue limits, disabled spooling or disk failures can still drop captures; inspect `/agentmemory-status`. Session finalization is best effort within OMP's two-second shutdown budget. Summary generation and consolidation run on the server.
 
-| Variable | Default | Description |
+## Configuration
+
+| Variable | Default | Purpose |
 |---|---|---|
-| `AGENTMEMORY_URL` | `http://localhost:3111` | agentmemory server URL |
-| `AGENTMEMORY_SECRET` | (auto-detected locally) | Explicit bearer token; loopback connections otherwise read `~/.agentmemory/.env` or `~/.agentmemory/secret`. Remote servers require an explicit token. |
-| `AGENTMEMORY_CREDENTIAL_MODE` | (unset) | Set to `explicit` to disable local credential discovery. |
-| `AGENTMEMORY_PROJECT_NAME` | (unset) | Overrides the project name used in session/observation payloads. Defaults to the git repo basename (or cwd basename if not a git repo). |
-| `AGENTMEMORY_INJECT_CONTEXT` | (off) | When set to `1`, injects file enrichment context (via `/enrich`) into the conversation for files touched by tools. |
+| `AGENTMEMORY_URL` | `http://localhost:3111` | Daemon URL |
+| `AGENTMEMORY_SECRET` | Local discovery | Explicit bearer token; loopback connections otherwise read `~/.agentmemory/.env` or `~/.agentmemory/secret` |
+| `AGENTMEMORY_CREDENTIAL_MODE` | Unset | `explicit` disables local credential discovery |
+| `AGENTMEMORY_PROJECT_NAME` | Git root or cwd basename | Project for native saves, recall and capture |
+| `AGENTMEMORY_INJECT_CONTEXT` | Off | `1` enables file context enrichment |
+| `AGENTMEMORY_CAPTURE_ALLOW` / `AGENTMEMORY_CAPTURE_DENY` | Default memory-tool exclusions | Comma/space separated tool names or globs; allow takes precedence |
+| `AGENTMEMORY_CAPTURE_OUTPUT_MAX` | `8000` | Capture input/output character limit |
+| `AGENTMEMORY_PRE_COMPACT_BUDGET` | `1500` | Memory context token budget; `0` disables it |
+| `AGENTMEMORY_CAPTURE_SPOOL` | Enabled | `false` disables offline queueing |
+| `AGENTMEMORY_CAPTURE_SPOOL_DIR` | `<data dir>/capture-spool` | Private local queue directory |
+| `AGENTMEMORY_CAPTURE_SPOOL_MAX_BYTES` | `5242880` | Queue size limit |
+| `AGENTMEMORY_CAPTURE_SPOOL_MAX_AGE_HOURS` | `168` | Maximum queued-event age |
 
-Bearer tokens are only sent over HTTPS or to loopback addresses (`localhost`, `127.0.0.0/8`, or `::1`). Remote HTTP connections with credentials are refused.
+Export remote URL and credentials in the environment that starts OMP. Bearer credentials require HTTPS for non-loopback hosts; redirects are refused. Reconnect with `--with-mcp` after moving or upgrading the installed npm package so its runtime path stays current.
 
-## Smoke test
+To remove the connector installation, remove its directory from OMP's `extensions` array and then remove the copied `agentmemory` directory. Restart OMP. Existing user MCP entries and stored memories are independent.
 
-Run omp and ask it to use the `memory_health` tool, or call the command directly:
-
-```text
-/agentmemory-status
-```
-
-You should see `agentmemory healthy` and a footer status like `🧠 agentmemory`.
-
-## Notes
-
-- Requires omp 18.12 or newer. Retrieved memories are supplied as reference messages while the host system prompt remains intact.
-- This extension uses omp's extension API, not MCP. Session finalization is awaited within omp's two-second shutdown budget; summary refresh and scheduled consolidation run on the server.
-- If the daemon is unavailable, the conversation continues and memory tools report failure. Unacknowledged captures are not queued for offline replay.
-- One local agentmemory server can be shared across omp, pi, pi2, Hermes, OpenClaw, Claude Code, Codex CLI, and Gemini CLI.
-
-## See also
-
-- [agentmemory main README](../../README.md)
-- [pi integration](../pi/README.md)
-- [Hermes integration](../hermes/README.md)
-- [OpenClaw integration](../openclaw/README.md)
+Automated `connect` supports macOS/Linux and OMP running in the same WSL environment. Native Windows automated OMP setup is not supported.

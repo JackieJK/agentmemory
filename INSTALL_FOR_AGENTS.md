@@ -109,11 +109,13 @@ npx -y @agentmemory/agentmemory@latest connect <agent>
 
 `connect` merges agentmemory into that agent's MCP config and preserves any existing servers. Supported agent names:
 
-`claude-code`, `copilot-cli`, `codex`, `cursor`, `gemini-cli`, `opencode`, `cline`, `continue`, `droid`, `hermes`, `openclaw`, `openhuman`, `pi`, `qwen`, `warp`, `zed`, `antigravity`, `kiro`.
+`claude-code`, `copilot-cli`, `codex`, `cursor`, `gemini-cli`, `opencode`, `cline`, `continue`, `droid`, `hermes`, `openclaw`, `openhuman`, `pi`, `omp`, `qwen`, `warp`, `zed`, `antigravity`, `kiro`.
 
 If you cannot tell which agent you are, default to `claude-code` on macOS/Linux. On native Windows, `copilot-cli` is the only automated adapter; configure all other agents with the manual MCP block in the README. Run `connect` inside WSL only when the target agent is installed inside the same WSL environment. After wiring, restart the agent or run its MCP reload command (for example `/mcp` in Claude Code) so it picks up the server.
 
 Expect: the agent now lists agentmemory's tools. With the server running you should see the full set of 54 tools (for example `memory_save`, `memory_smart_search`, `memory_sessions`). If you see only 7 tools, the MCP shim could not reach the server; see Troubleshooting.
+
+For Oh My Pi, `connect omp` installs native capture, recall and the bundled skills. Use `connect omp --with-mcp` for the full toolset, then restart OMP and run `/agentmemory-status`. See [OMP setup and verification](integrations/omp/README.md).
 
 ## 6. Install native skills
 

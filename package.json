@@ -66,6 +66,7 @@
     "!dist/plugins/**",
     "plugin/",
     "integrations/pi/",
+    "integrations/omp/",
     "integrations/hermes/",
     "integrations/openclaw/",
     "iii-config.yaml",
