@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanCapture, createCapture } from "../integrations/omp/capture.js";
+import { appendSpool } from "../src/capture/spool.js";
 
 const url = "http://127.0.0.1:43392";
 const body = { eventId: "event-12345678", hookType: "post_tool_use", sessionId: "session-1", project: "test", cwd: "/tmp/test", timestamp: new Date().toISOString(), data: { tool_name: "read", tool_output: "hello" } };
@@ -24,6 +25,18 @@ describe("OMP capture recovery", () => {
     const capture = createCapture(url, async () => ({ status, body: null }));
     capture.enqueue(body); await capture.flush(); capture.stop();
     expect(capture.status().records).toBe(0); expect(capture.status().error).toContain("rejected");
+  });
+  it("bounds replay of slow successful requests and leaves the remaining events queued", async () => {
+    for (let i = 0; i < 10; i++) appendSpool(url, `event-${i}`, { ...body, eventId: `event-${i}` }, "offline");
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const send = vi.fn(async () => { now += 400; return { status: 202, body: { status: "accepted" } }; });
+    const capture = createCapture(url, send);
+    try {
+      await capture.replay();
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(capture.status().records).toBe(8);
+    } finally { capture.stop(); clock.mockRestore(); }
   });
   it("retains acknowledgements until durable and requeues them if the daemon boot changes", async () => {
     let bootId = "oldboot1234";

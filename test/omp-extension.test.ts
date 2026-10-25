@@ -304,6 +304,25 @@ describe("omp extension", () => {
     expect(payload.data.tool_input).not.toContain("short-secret");
     expect(event.content[0].text).toContain("<private>");
   });
+  it("scrubs secrets in metadata and input keys before any request reaches the wire", async () => {
+    const secret = "ghp_" + "a".repeat(36);
+    vi.stubEnv("AGENTMEMORY_PROJECT_NAME", secret);
+    const { handlers, ctx } = extension(); ctx.cwd = `/workspace/${secret}`;
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("before_agent_start")!({ prompt: "work", systemPrompt: [] }, ctx);
+    const input = { [secret]: "preserved value" };
+    handlers.get("tool_result")!({ toolName: "read", input, content: [{ type: "text", text: "done" }] });
+    const requests = vi.mocked(fetch).mock.calls.filter(([, options]) => options?.body);
+    expect(requests.length).toBeGreaterThan(0);
+    for (const [, options] of requests) expect(options!.body).not.toContain(secret);
+    const capture = JSON.parse(vi.mocked(fetch).mock.lastCall![1]!.body as string);
+    expect(capture).toMatchObject({ project: "[REDACTED_SECRET]", cwd: "/workspace/[REDACTED_SECRET]" });
+    expect(JSON.parse(capture.data.tool_input)).toEqual({ "[REDACTED_SECRET]": "preserved value" });
+    expect(Object.keys(input)).toEqual([secret]);
+    vi.stubEnv("AGENTMEMORY_CAPTURE_OUTPUT_MAX", "100");
+    handlers.get("tool_result")!({ toolName: "read", input: { prefix: "x".repeat(60), ...input }, content: [] });
+    expect(vi.mocked(fetch).mock.lastCall![1]!.body).not.toContain("ghp_");
+  });
 
   it("does not capture a final reply while OMP is still continuing asynchronously", async () => {
     const { handlers, ctx } = extension();

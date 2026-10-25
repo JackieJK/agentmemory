@@ -1,9 +1,10 @@
 import { deriveEventId } from "../../src/capture/event-id.js";
+import { generateId } from "../../src/state/schema.js";
+import { scrubRecord } from "../../src/functions/privacy.js";
 import { shouldCaptureTool, captureOutputMax, truncateCaptureOutput, preCompactBudget } from "../../src/hooks/_capture-filter.js";
 import { cleanCapture, createCapture } from "./capture.js";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import path from "node:path";
-import crypto from "node:crypto";
 import { execSync } from "node:child_process";
 import { guardPlaintextBearerAuth, resolveSecret } from "./security.js";
 
@@ -138,7 +139,7 @@ async function requestAgentMemory(
       method,
       redirect: "error",
       headers,
-      body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body: options?.body !== undefined ? JSON.stringify(scrubRecord(options.body, { scrubKeys: true })) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
     });
     return { status: response.status, body: await response.json().catch(() => null) };
@@ -155,7 +156,7 @@ async function callAgentMemory<T>(pathname: string, options?: Parameters<typeof 
 export default function agentmemoryExtension(pi: ExtensionAPI) {
   guardPlaintextBearerAuth(getBaseUrl(), resolveSecret(getBaseUrl(), process.env["AGENTMEMORY_SECRET"]));
 
-  let sessionId = `omp_${crypto.randomUUID()}`;
+  let sessionId = generateId("omp");
   let currentProject = resolveProject();
   let currentCwd = process.cwd();
   let lastPrompt = "";
@@ -164,10 +165,10 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
 
   const fileStash = new Set<string>();
   const capture = createCapture(getBaseUrl(), body => requestAgentMemory("observe", { body, timeoutMs: 500 }));
-  let turnId = crypto.randomUUID();
+  let turnId = generateId("turn");
   const seenEvents = new Set<string>();
 
-  function observe(hookType: string, data: Record<string, unknown>, host: Record<string, unknown> = { eventId: crypto.randomUUID() }) {
+  function observe(hookType: string, data: Record<string, unknown>, host: Record<string, unknown> = { eventId: generateId("event") }) {
     const eventId = deriveEventId(hookType, sessionId, host, data);
     if (seenEvents.has(eventId)) return;
     if (seenEvents.size >= 1000) seenEvents.delete(seenEvents.values().next().value!);
@@ -342,7 +343,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     lastPrompt = prompt?.trim() || "";
     if (!lastPrompt) return;
 
-    turnId = crypto.randomUUID();
+    turnId = generateId("turn");
     observe("prompt_submit", { prompt: lastPrompt }, { eventId: turnId });
     void capture.replay();
     await refreshStatus(ctx);

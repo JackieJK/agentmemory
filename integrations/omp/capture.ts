@@ -1,14 +1,14 @@
 import { appendSpool, drainSpool, parseSentMark, reconcileSent, retainSent, spoolSummary, type SendOutcome, type SpoolRecord } from "../../src/capture/spool.js";
-import { stripPrivateData } from "../../src/functions/privacy.js";
+import { scrubRecord, stripPrivateData } from "../../src/functions/privacy.js";
 
 export function cleanCapture(value: unknown): unknown {
   if (typeof value === "string") {
     try { return JSON.stringify(cleanCapture(JSON.parse(value))); } catch { return stripPrivateData(value); }
   }
   if (Array.isArray(value)) return value.map(cleanCapture);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+  if (value && typeof value === "object") return scrubRecord(Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
     /(?:password|secret|token|credential|authorization|apikey)$/i.test(key.replace(/[_-]/g, "")) ? "[REDACTED_SECRET]" : cleanCapture(item),
-  ]));
+  ])), { scrubKeys: true });
   return value;
 }
 
@@ -40,7 +40,7 @@ export function createCapture(url: string, post: (body: Record<string, unknown>)
   }
   function replay() {
     if (stopped || draining) return draining;
-    draining = track(drainSpool(url, send, { maxRecords: 100, deadlineMs: Date.now() + 600 })).finally(() => { draining = undefined; });
+    draining = track(drainSpool(url, send, { maxRecords: 100, deadlineMs: 600 })).finally(() => { draining = undefined; });
     return draining;
   }
   return {

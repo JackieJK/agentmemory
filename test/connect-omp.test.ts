@@ -58,6 +58,32 @@ describe("OMP native connector", () => {
     expect(readFileSync(file, "utf8")).toBe(raw);
     expect(existsSync(join(agent, "agentmemory/.mcp.json"))).toBe(false);
   });
+  it.each([false, true])("removes the managed MCP entry when the user takes ownership (withMcp=%s)", async withMcp => {
+    await install({ withMcp: true });
+    const file = join(agent, "mcp.json"); const raw = '{"mcpServers":{"agentmemory":{"command":"custom"}}}'; put(file, raw);
+    expect((await install({ withMcp })).kind).toBe("installed");
+    expect(readFileSync(file, "utf8")).toBe(raw);
+    expect(existsSync(join(agent, "agentmemory/.mcp.json"))).toBe(false);
+    expect((await install({ withMcp })).kind).toBe("already-wired");
+  });
+  it("backs up a customized managed MCP entry only when force permits its removal", async () => {
+    await install({ withMcp: true });
+    const file = join(agent, "agentmemory/.mcp.json"); const raw = '{"mcpServers":{"custom":{"command":"keep"}}}'; put(file, raw);
+    put(join(agent, "mcp.json"), '{"mcpServers":{"agentmemory":{"command":"user-owned"}}}');
+    expect((await install({ withMcp: true })).kind).toBe("skipped");
+    expect(readFileSync(file, "utf8")).toBe(raw);
+    const result = await install({ withMcp: true, force: true });
+    expect(result.kind).toBe("installed");
+    expect(existsSync(file)).toBe(false);
+    if (result.kind === "installed") expect(readFileSync(join(result.backupPath!, ".mcp.json"), "utf8")).toBe(raw);
+  });
+  it.each([true, false])("preserves unmanaged MCP files and refuses only conflicts (conflicting=%s)", async conflicting => {
+    const file = join(agent, "agentmemory/.mcp.json"); const raw = JSON.stringify({ mcpServers: { [conflicting ? "agentmemory" : "custom"]: { command: "custom" } } }); put(file, raw);
+    put(join(agent, "mcp.json"), '{"mcpServers":{"agentmemory":{"command":"user-owned"}}}');
+    expect((await install({ withMcp: true, force: true })).kind).toBe(conflicting ? "skipped" : "installed");
+    expect(readFileSync(file, "utf8")).toBe(raw);
+    expect(existsSync(join(agent, "config.yml"))).toBe(!conflicting);
+  });
   it("uses config.yaml when present and migrates legacy JSON without dropping unrelated settings", async () => {
     put(join(agent, "config.yaml"), "model: yaml-model\n"); await install();
     expect(existsSync(join(agent, "config.yml"))).toBe(false);

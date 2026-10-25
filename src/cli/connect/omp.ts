@@ -59,13 +59,18 @@ export const adapter: ConnectAdapter = {
       const mcpPath = join(target, ".mcp.json");
       const extra: Record<string, string> = {};
       if (existsSync(mcpPath)) extra[".mcp.json"] = readFileSync(mcpPath, "utf8");
-      if (opts.withMcp) {
+      let userOwnsMcp = false;
+      if (opts.withMcp || existsSync(mcpPath)) {
         const nativeMcpPath = join(paths.agent, "mcp.json");
         const nativeMcp = existsSync(nativeMcpPath) ? JSON.parse(readFileSync(nativeMcpPath, "utf8")) : {};
-        if (nativeMcp.mcpServers?.agentmemory !== undefined) p.log.info("Preserved the existing AgentMemory MCP server in OMP's mcp.json.");
-        else extra[".mcp.json"] = JSON.stringify({ mcpServers: { agentmemory: nativeMcpEntry(root) } }, null, 2) + "\n";
+        userOwnsMcp = nativeMcp.mcpServers?.agentmemory !== undefined;
+        if (userOwnsMcp) {
+          delete extra[".mcp.json"];
+          p.log.info("Preserved the existing AgentMemory MCP server in OMP's mcp.json.");
+        } else if (opts.withMcp) extra[".mcp.json"] = JSON.stringify({ mcpServers: { agentmemory: nativeMcpEntry(root) } }, null, 2) + "\n";
       }
       const bundle = prepareNativeBundle(join(root, "integrations/omp"), target, "omp-extension", ["package.json", "dist/index.mjs"], opts.force, join(root, "plugin/skills"), extra);
+      if (userOwnsMcp && existsSync(mcpPath) && !bundle.previous[".mcp.json"] && JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers?.agentmemory !== undefined) throw new Error(`Unmanaged ${mcpPath} conflicts with OMP's mcp.json. Remove the duplicate AgentMemory configuration before reconnecting.`);
       if (!extensions.includes(target)) doc.set("extensions", [...extensions, target]);
       const text = doc.toString();
       if (opts.dryRun) {
